@@ -43,31 +43,31 @@ Each dataset is read, cleaned, and standardized into a single unified daily and 
 
 ### REPOSITORY STRUCTURE
 
-dynamic_hrp_project/
-│
-├── dynamic_hrp/ # Core Python package
-│ ├── init.py
-│ ├── io_data.py # Load and clean raw CSVs into unified panels
-│ ├── standardize.py # Helper functions for date parsing and cleaning
-│ ├── universe.py # Select investable assets and feature panels
-│ ├── returns.py # Compute daily and weekly log returns
-│ ├── signals.py # Generate trend-following (TSMOM) signals
-│ ├── features.py # Build and standardize HMM regime features
-│ ├── hmm_wf.py # Hidden Markov Model (walk-forward inference)
-│ ├── hrp.py # HRP allocation models (variance and CVaR)
-│ ├── backtests.py # Backtest logic for dynamic HRP and benchmarks
-│ └── perf.py # Performance metrics and statistics
-│
-├── Data/ 
-│ ├── AT-03_Energy_Metals_Comdty_Future_Daily_2000_2025.csv
-│ ├── AT-04_Daily_Spot_Prices_G10_FX_Pairs_Daily_2000_2025.csv
-│ ├── AT-15_NOB_Spread_Compenents_Daily_2005_2025.csv
-│ ├── AT-16_Euro_Bond_Future_Daily_2005_2025.csv
-│ ├── AT-39_Equity_Futures_Daily_1990_2025.csv
-│ └── AT-46_Volatility_Index_Daily_1990_2025.csv
-│
-├── main.py # Main execution file
-└── README.md # Project documentation
+dynamic_hrp_project/ <br>
+│<br>
+├── dynamic_hrp/ # Core Python package<br>
+│ ├── init.py<br>
+│ ├── io_data.py # Load and clean raw CSVs into unified panels<br>
+│ ├── standardize.py # Helper functions for date parsing and cleaning<br>
+│ ├── universe.py # Select investable assets and feature panels<br>
+│ ├── returns.py # Compute daily and weekly log returns<br>
+│ ├── signals.py # Generate trend-following (TSMOM) signals<br>
+│ ├── features.py # Build and standardize HMM regime features<br>
+│ ├── hmm_wf.py # Hidden Markov Model (walk-forward inference)<br>
+│ ├── hrp.py # HRP allocation models (variance and CVaR)<br>
+│ ├── backtests.py # Backtest logic for dynamic HRP and benchmarks<br>
+│ └── perf.py # Performance metrics and statistics<br>
+│<br>
+├── Data/ <br>
+│ ├── AT-03_Energy_Metals_Comdty_Future_Daily_2000_2025.csv<br>
+│ ├── AT-04_Daily_Spot_Prices_G10_FX_Pairs_Daily_2000_2025.csv<br>
+│ ├── AT-15_NOB_Spread_Compenents_Daily_2005_2025.csv<br>
+│ ├── AT-16_Euro_Bond_Future_Daily_2005_2025.csv<br>
+│ ├── AT-39_Equity_Futures_Daily_1990_2025.csv<br>
+│ └── AT-46_Volatility_Index_Daily_1990_2025.csv<br>
+│<br>
+├── main.py # Main execution file<br>
+└── README.md # Project documentation<br>
 
 
 ### HOW TO RUN THE PROJECT
