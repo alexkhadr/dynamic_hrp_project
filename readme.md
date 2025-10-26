@@ -76,11 +76,9 @@ Navigate to the project folder. <br>
 Example: <br>
 cd "C:/Users/alexk/Desktop/University of Toronto/Dynamic Data Science/dynamic_hrp_project" <br>
 
-Create a virtual environment (optional but recommended). <br>
-python -m venv .venv <br>
-Activate it depending on your terminal. <br>
-
 Install required libraries. <br>
+python -m pip install -r requirements.txt <br>
+OR <br>
 pip install pandas numpy matplotlib scipy hmmlearn scikit-learn <br>
 
 Run the project. <br>
