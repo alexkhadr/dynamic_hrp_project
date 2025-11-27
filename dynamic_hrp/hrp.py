@@ -11,6 +11,8 @@ import numpy as np
 import pandas as pd
 from scipy.cluster.hierarchy import linkage
 from scipy.spatial.distance import squareform
+from .denoising import denoise_cov
+
 
 # Try importing Ledoit-Wolf shrinkage covariance estimator (optional)
 try:
@@ -200,30 +202,39 @@ def hrp_variance(returns_window: pd.DataFrame) -> pd.Series:
     """
     cols = list(returns_window.columns)
 
-    # Step 1: Estimate covariance and correlation
+    # --- RMT Denoising Parameters ---
+    T = len(returns_window.dropna(how='all'))
+    N = len(cols)
+    q = T / N
+    
+    # Step 1: Estimate covariance
     cov = cov_shrink(returns_window)
-    corr = corr_from_cov(cov)
+    
+    # NEW STEP 1b: Denoise the covariance matrix
+    cov_denoised = denoise_cov(cov, q=q, bandwidth=0.01) # Use the computed q=T/N ratio
 
-    # Step 2: Convert correlation to distance matrix (for clustering)
+    # Step 2: Convert denoised covariance to correlation
+    corr = corr_from_cov(cov_denoised) # <-- Use DENOISED COV
+
+    # Step 3: Convert correlation to distance matrix (for clustering)
     dist = dist_from_corr(corr)
     condensed = squareform(dist.values, checks=False)
 
-    # Step 3: Perform hierarchical clustering (single linkage)
+    # Step 4: Perform hierarchical clustering (single linkage)
     Z = linkage(condensed, method="single")
 
-    # Step 4: Extract leaf ordering (asset sequence)
+    # Step 5: Extract leaf ordering (asset sequence)
     order = seriation_order(Z, n=len(cols))
 
-    # Step 5: Recursively allocate weights based on cluster variance
-    risk = lambda idx: cluster_var(cov, idx)
-    w_ord = _hrp_recursive(order, cov, risk)
+    # Step 6: Recursively allocate weights based on cluster variance
+    risk = lambda idx: cluster_var(cov_denoised, idx) # <-- Use DENOISED COV
+    w_ord = _hrp_recursive(order, cov_denoised, risk) # <-- Use DENOISED COV
 
-    # Step 6: Map ordered weights back to asset labels
+    # Step 7: Map ordered weights back to asset labels
     w = pd.Series(0.0, index=cols)
     for pos, col_idx in enumerate(order):
         w.iloc[col_idx] = w_ord[pos]
     return w
-
 
 # -------------------------------------------------------------
 # HRP with CVaR Risk Measure
@@ -231,28 +242,41 @@ def hrp_variance(returns_window: pd.DataFrame) -> pd.Series:
 def hrp_cvar(returns_window: pd.DataFrame, alpha: float = 0.95) -> pd.Series:
     """
     Compute Hierarchical Risk Parity (HRP) portfolio weights using CVaR as risk metric.
-
-    Similar to hrp_variance but uses downside-tail risk instead of variance.
     """
     cols = list(returns_window.columns)
 
-    # Step 1: Estimate covariance and correlation
-    cov = cov_shrink(returns_window)
-    corr = corr_from_cov(cov)
+    # --- RMT Denoising Parameters ---
+    T = len(returns_window.dropna(how='all'))
+    N = len(cols)
+    q = T / N
 
-    # Step 2: Convert correlation to López de Prado distance
+    # Step 1: Estimate covariance
+    cov = cov_shrink(returns_window)
+
+    # NEW STEP 1b: Denoise the covariance matrix
+    cov_denoised = denoise_cov(cov, q=q, bandwidth=0.01) # Use the computed q=T/N ratio
+
+    # Step 2: Convert denoised covariance to correlation
+    corr = corr_from_cov(cov_denoised) # <-- Use DENOISED COV
+
+    # Step 3: Convert correlation to López de Prado distance
     dist = dist_from_corr(corr)
     condensed = squareform(dist.values, checks=False)
 
-    # Step 3: Hierarchical clustering
+    # Step 4: Hierarchical clustering
     Z = linkage(condensed, method="single")
 
-    # Step 4: Asset ordering and recursive allocation using CVaR
+    # Step 5: Asset ordering and recursive allocation using CVaR
     order = seriation_order(Z, n=len(cols))
-    risk = lambda idx: cluster_cvar(returns_window, cov, idx, alpha=alpha)
-    w_ord = _hrp_recursive(order, cov, risk)
+    
+    # NOTE: CVaR still needs the returns_window for tail calculation, but the
+    # recursive HRP allocation should use the denoised matrix for risk measurement 
+    # (specifically, the `cluster_cvar` function internally uses `ivp_w`, which 
+    # uses the covariance submatrix for weighting).
+    risk = lambda idx: cluster_cvar(returns_window, cov_denoised, idx, alpha=alpha) # <-- Use DENOISED COV
+    w_ord = _hrp_recursive(order, cov_denoised, risk) # <-- Use DENOISED COV
 
-    # Step 5: Re-map weights to asset names
+    # Step 6: Re-map weights to asset names
     w = pd.Series(0.0, index=cols)
     for pos, col_idx in enumerate(order):
         w.iloc[col_idx] = w_ord[pos]

@@ -23,7 +23,7 @@ import matplotlib.pyplot as plt
 # --- Import project modules ---
 from dynamic_hrp.io_data import load_raw_frames, split_ohlcv_blocks, build_price_panels
 from dynamic_hrp.universe import define_investable_universe
-from dynamic_hrp.returns import weekly_log_returns_from_daily, apply_weekly_execution_delay
+from dynamic_hrp.returns import weekly_log_returns_from_daily, apply_weekly_execution_delay, weekly_last_from_daily 
 from dynamic_hrp.signals import tsmom_signal_ma, smooth_signals
 from dynamic_hrp.features import build_and_standardize_hmm_features
 from dynamic_hrp.backtests import (
@@ -32,8 +32,11 @@ from dynamic_hrp.backtests import (
     backtest_equal_weight,
     backtest_static_hrp_var,
 )
-from dynamic_hrp.graphs import plot_statewise_strategy_hists, plot_hist_by_regime
+from dynamic_hrp.frac_diff import fractionally_differentiated_log_price
+from dynamic_hrp.graphs import plot_statewise_strategy_hists, plot_hist_by_regime, plot_cumulative_pnl
 from perf import perf_stats  # local performance stats module
+from dynamic_hrp.utils_io import save_table_markdown
+
 
 # =============================================================
 # -------------------------- MAIN FUNCTION --------------------
@@ -51,15 +54,14 @@ def run(convert_rx1_to_usd: bool = False, show_plots: bool = True):
     """
 
     # ---------------------------------------------------------
-    # 1) Load raw data from all input CSVs
+    # 1) Load raw data
     # ---------------------------------------------------------
-    raw = load_raw_frames()  # dictionary of raw dataframes
+    raw = load_raw_frames()
 
     # ---------------------------------------------------------
-    # 2) Split the wide energy/metals OHLCV file into individual tickers
+    # 2) Split energy/metals OHLCV blocks
     # ---------------------------------------------------------
     energy_blocks = split_ohlcv_blocks(raw["Energy_Comdty"])
-    # Retrieve Gold (GC1) and Crude Oil (CL1) dataframes (may vary depending on file labels)
     GC1 = energy_blocks.get("GC1 Comdty", pd.DataFrame())
     CL1 = energy_blocks.get("CL1 Comdty", pd.DataFrame())
 
@@ -78,94 +80,152 @@ def run(convert_rx1_to_usd: bool = False, show_plots: bool = True):
     )
 
     # ---------------------------------------------------------
-    # 4) Define investable universe and feature panels
+    # 4) Define investable universe and features
     # ---------------------------------------------------------
-    # Tradables: ES1, TY1, EU1 (or RX1 fallback), CL1
-    # Feature: VIX (volatility index)
     univ_d, univ_w, feats_d, mapping = define_investable_universe(prices_daily, prices_weekly)
 
-    # If weekly prices were not provided, construct them from daily data
     if univ_w is None or univ_w.empty:
-        from dynamic_hrp.returns import weekly_last_from_daily
+        # Fallback if weekly prices weren't generated in step 3
+        # (needs `from dynamic_hrp.returns import weekly_last_from_daily` at top level)
         univ_w = weekly_last_from_daily(univ_d, week_day="FRI")
 
     # ---------------------------------------------------------
-    # 5) Compute weekly returns and apply 1-week execution delay
+    # 5) Compute weekly returns with 1-week execution delay
+    # NOTE: `ret_weekly` here is the standard d=1 log return, used for PnL calculation
     # ---------------------------------------------------------
     p_w, ret_weekly = weekly_log_returns_from_daily(univ_d, week_day="FRI")
 
     ret_weekly_exec = apply_weekly_execution_delay(
         weekly_weights_dates=p_w.index,
         weekly_returns=ret_weekly,
-        delay_weeks=1,  # ensures signals at t are executed at t+1
+        delay_weeks=1,
     )
 
     # ---------------------------------------------------------
-    # 6) Build time-series momentum (TSMOM) signals
+    # 6) Build TSMOM signals and smooth them
     # ---------------------------------------------------------
     signals_ma, _ = tsmom_signal_ma(univ_w, lookbacks=[13, 26, 52])
-    # Apply exponential smoothing to reduce noise and sign flips
     signals_ma_smooth = smooth_signals(signals_ma)
 
+    # =========================================================
+    # 6b) NEW: Compute Fractionally Differentiated Series (for HMM features only)
+    # =========================================================
+    print("\nStarting Fractional Differentiation (Searching for Optimal d)...")
+    # Optimal 'd' is found, and the log price series is differenced using that 'd'
+    frac_diff_d = fractionally_differentiated_log_price(univ_d, p_value=0.05)
+    
+    # Resample the daily fractionally differenced series to weekly frequency (W-FRI)
+    frac_diff_w = weekly_last_from_daily(frac_diff_d, week_day="FRI") 
+    print("Fractional Differentiation Complete.")
+    
     # ---------------------------------------------------------
-    # 7) Build Hidden Markov Model (HMM) features
+    # 7) Build HMM regime features
+    # KEY CHANGE: Use the fractionally differenced series (frac_diff_w)
     # ---------------------------------------------------------
-    # Regime features include volatility, correlations, skew, kurtosis, etc.
-    # Standardized via expanding z-scores to avoid look-ahead bias.
     features_raw, features_std = build_and_standardize_hmm_features(
-        weekly_returns=ret_weekly,
-        weekly_signals=signals_ma,      # use unsmoothed signals for feature construction
-        vix_daily=feats_d.get("VIX"),   # optional volatility input
+        weekly_returns=frac_diff_w,
+        weekly_signals=signals_ma,
+        vix_daily=feats_d.get("VIX"),
         window_weeks=26,
         freq="W",
         min_periods_std=26,
     )
 
     # ---------------------------------------------------------
-    # 8) Align all data to full overlapping rows and run backtests
+    # 8) Align all data and run backtests
     # ---------------------------------------------------------
+    # NOTE: `ret_weekly` (standard log returns) is still used for the final PnL.
     features_std_trim, ret_weekly_trim, signals_trim = align_and_trim_to_full_rows(
         features_std, ret_weekly, signals_ma_smooth
     )
 
-    # --- Run backtests ---
-    bt_dyn = backtest_dynamic_hrp(features_std_trim, ret_weekly_trim)  # regime-switching HRP
-    bt_eq  = backtest_equal_weight(ret_weekly_trim)                    # equal-weight benchmark
-    bt_hrp = backtest_static_hrp_var(ret_weekly_trim)                  # static HRP baseline
+    bt_dyn = backtest_dynamic_hrp(features_std_trim, ret_weekly_trim)
+    bt_eq  = backtest_equal_weight(ret_weekly_trim)
+    bt_hrp = backtest_static_hrp_var(ret_weekly_trim)
 
     # ---------------------------------------------------------
     # 9) Evaluate performance (weekly statistics)
     # ---------------------------------------------------------
-    print("\nPerformance (weekly):")
-    print("Dynamic HRP:\n", perf_stats(bt_dyn["pnl"]))
-    print("Equal Weight:\n", perf_stats(bt_eq["pnl"]))
-    print("Static HRP (Var):\n", perf_stats(bt_hrp["pnl"]))
+    perf_dyn = perf_stats(bt_dyn["pnl"])
+    perf_eq  = perf_stats(bt_eq["pnl"])
+    perf_hrp = perf_stats(bt_hrp["pnl"])
+
+    perf_table = pd.DataFrame({
+        "Dynamic HRP": perf_dyn,
+        "Equal Weight": perf_eq,
+        "Static HRP (Var)": perf_hrp,
+    }).T
+
+    save_table_markdown(perf_table, out_dir="Tables", name="performance_weekly")
+
+    # ---------------------------------------------------------
+    # 9b) Statistical test: Does Dynamic HRP outperform Static HRP?
+    # ---------------------------------------------------------
+    from scipy import stats
+    import numpy as np
+
+    r_dyn = bt_dyn["pnl"].dropna()
+    r_static = bt_hrp["pnl"].dropna()
+
+    aligned = pd.concat([r_dyn, r_static], axis=1).dropna()
+    r_dyn = aligned.iloc[:, 0]
+    r_static = aligned.iloc[:, 1]
+
+    # Tests
+    t_stat, p_val_t = stats.ttest_rel(r_dyn, r_static, alternative='greater')
+    stat_w, p_val_w = stats.wilcoxon(r_dyn, r_static, alternative='greater')
+
+    n_boot = 10000
+    boot_diff = np.empty(n_boot)
+    for i in range(n_boot):
+        sample = np.random.choice(len(r_dyn), len(r_dyn), replace=True)
+        boot_diff[i] = r_dyn.iloc[sample].mean() - r_static.iloc[sample].mean()
+    p_val_boot = np.mean(boot_diff <= 0)
+
+    tests_table = pd.DataFrame(
+        {
+            "Statistic": [t_stat, stat_w, np.nan],
+            "P-value": [p_val_t, p_val_w, p_val_boot],
+            "Alt. Hypothesis": ["mean_dyn > mean_static"] * 3,
+        },
+        index=["Paired t-test", "Wilcoxon", "Bootstrap"]
+    )
+
+    save_table_markdown(tests_table, out_dir="Tables", name="stat_tests_dynamic_vs_static")
 
     # ---------------------------------------------------------
     # 10) Plot regime and strategy histograms
     # ---------------------------------------------------------
-    plot_hist_by_regime(bt_dyn["pnl"], bt_dyn["regimes"])
-    plot_statewise_strategy_hists(bt_dyn, bt_eq, bt_hrp, bins=40)
+    plot_hist_by_regime(
+        bt_dyn["pnl"], bt_dyn["regimes"],
+        save_path="Figures/hist_by_regime.png",
+        show=show_plots,
+        verbose=False,
+        save_tables_to="Tables/per_regime_weekly_return_stats.md",
+        save_table_markdown_fn=save_table_markdown,
+    )
+
+    plot_statewise_strategy_hists(
+        bt_dyn, bt_eq, bt_hrp, bins=40,
+        save_path="Figures/hist_by_strategy_and_regime.png",
+        show=show_plots,
+        verbose=False,
+        save_tables_to="Tables/per_state_strategy_summary.md",
+        save_table_markdown_fn=save_table_markdown,
+    )
+
 
     # ---------------------------------------------------------
     # 11) Plot cumulative PnL comparison
     # ---------------------------------------------------------
-    if show_plots:
-        pd.concat({
-            "Dynamic HRP": bt_dyn["cum_pnl"],
-            "Equal Weight": bt_eq["cum_pnl"],
-            "Static HRP (Var)": bt_hrp["cum_pnl"],
-        }, axis=1).plot(
-            figsize=(10, 5),
-            title="Strategy vs Benchmarks (Cumulative Return)"
-        )
-        plt.tight_layout()
-        plt.show()
-
+    plot_cumulative_pnl(
+        bt_dyn, bt_eq, bt_hrp,
+        save_path="Figures/cumulative_pnl.png", show=show_plots
+    )
 
 # =============================================================
 # --------------------------- ENTRY POINT ---------------------
 # =============================================================
 if __name__ == "__main__":
     # Run full pipeline (default: RX1 not converted to USD, plots enabled)
-    run(convert_rx1_to_usd=False, show_plots=True)
+    run(convert_rx1_to_usd=False, show_plots=False)

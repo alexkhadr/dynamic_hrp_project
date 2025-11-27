@@ -65,6 +65,10 @@ dynamic_hrp_project/ <br>
 │ ├── AT-16_Euro_Bond_Future_Daily_2005_2025.csv<br>
 │ ├── AT-39_Equity_Futures_Daily_1990_2025.csv<br>
 │ └── AT-46_Volatility_Index_Daily_1990_2025.csv<br>
+├── Figures/ <br>
+│ ├── cumulative_pnl.png <br>
+│ ├── hist_by_regime.png<br>
+│ └── hist_by_strategy_and_regime.png<br>
 │<br>
 ├── main.py # Main execution file<br>
 └── README.md # Project documentation<br>
@@ -95,7 +99,7 @@ When you run main.py, it will: <br>
 - Train a Hidden Markov Model to identify regimes (Trending, Neutral, Crisis).
 - Backtest Dynamic HRP portfolios that switch allocation rules depending on the regime.
 - Compare performance against static HRP and equal-weight portfolios.
-- Output plots and statistics such as cumulative returns, Sharpe ratio, CAGR, and drawdown.
+- Output plots and statistics such as cumulative returns, Sharpe ratio, CAGR, and drawdown. Graphs are saved in the Figures folder and tables are saved in the Tables folder
 
 ### EXAMPLE OUTPUTS
 
@@ -125,7 +129,7 @@ This regime-adaptive approach aims to maintain exposure in favorable environment
 
 ### REQUIREMENTS
 
-- Python 3.9 or later
+- Python 3.9
 - pandas
 - numpy
 - scipy

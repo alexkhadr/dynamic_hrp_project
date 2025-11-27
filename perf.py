@@ -1,17 +1,15 @@
 # -------------------------------------------------------------
 # Performance Statistics Utility
 # -------------------------------------------------------------
-# Computes key portfolio performance metrics from a PnL (return) series:
-#   • Mean weekly/daily return
-#   • Volatility
-#   • Sharpe ratio (annualized)
-#   • CAGR (compound annual growth rate)
-#   • Max Drawdown (worst peak-to-trough loss)
+# Computes key portfolio performance metrics from a PnL (return) series,
+# including higher moments (Skew, Kurtosis) needed for DSR.
 # -------------------------------------------------------------
 
 from __future__ import annotations
 import numpy as np
 import pandas as pd
+# Import required statistical functions
+from scipy.stats import skew, kurtosis 
 
 def perf_stats(pnl: pd.Series, freq: str = "W") -> pd.Series:
     """
@@ -28,33 +26,35 @@ def perf_stats(pnl: pd.Series, freq: str = "W") -> pd.Series:
     Returns
     -------
     pd.Series
-        Performance metrics including:
-          - Mean   : average periodic return
-          - Vol    : standard deviation of returns
-          - Sharpe : annualized Sharpe ratio
-          - CAGR   : compound annual growth rate
-          - MaxDD  : maximum drawdown
+        Performance metrics including: Mean, Vol, Sharpe, CAGR, MaxDD, 
+        Skew, and Kurtosis.
     """
     # Drop missing returns
     r = pnl.dropna()
+    N_obs = len(r)
 
     # --- Basic summary statistics ---
-    mean = r.mean()       # average periodic return
-    vol = r.std()         # standard deviation of returns
+    mean = r.mean()         # average periodic return
+    vol = r.std()           # standard deviation of returns
 
     # Annualization factor: 52 weeks/year or 252 days/year
-    ann_factor = np.sqrt(52) if freq == "W" else np.sqrt(252)
+    ann_factor_sq = 52 if freq == "W" else 252
+    ann_factor = np.sqrt(ann_factor_sq)
 
     # Annualized Sharpe ratio (assuming zero risk-free rate)
     sharpe = (mean / vol) * ann_factor if vol != 0 else np.nan
+    
+    # Non-normality moments (used for DSR)
+    # Note: bias=False for unbiased estimators; fisher=True for excess kurtosis
+    skewness = skew(r.values, bias=False) if N_obs >= 8 else np.nan 
+    kurt = kurtosis(r.values, fisher=True, bias=False) if N_obs >= 8 else np.nan
 
     # Compound Annual Growth Rate (CAGR)
-    # (1 + total return)^(annual periods / total obs) - 1
-    cagr = (1 + r).prod()**(52/len(r)) - 1 if len(r) > 0 else 0.0
+    cagr = (1 + r).prod()**(ann_factor_sq/N_obs) - 1 if N_obs > 0 else 0.0
 
     # --- Drawdown analysis ---
-    cum = (1 + r).cumprod()          # cumulative growth of $1
-    dd = 1 - cum / cum.cummax()      # drawdown series (as fraction)
+    cum = (1 + r).cumprod()      # cumulative growth of $1
+    dd = 1 - cum / cum.cummax()  # drawdown series (as fraction)
     maxdd = dd.max() if not dd.empty else 0.0  # maximum drawdown
 
     # Return all metrics as a labeled Series
@@ -63,6 +63,8 @@ def perf_stats(pnl: pd.Series, freq: str = "W") -> pd.Series:
         "Vol": vol,
         "Sharpe": sharpe,
         "CAGR": cagr,
-        "MaxDD": maxdd
+        "MaxDD": maxdd,
+        "Skew": skewness,
+        "Kurtosis": kurt,
+        "N_obs": N_obs # Number of observations
     })
-
