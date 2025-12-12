@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 from .hmm_wf import fit_hmm_walkforward        # walk-forward Hidden Markov Model labeling of regimes
 from .hrp import hrp_variance, hrp_cvar        # Hierarchical Risk Parity allocators (variance, CVaR)
+from .supervised_regime_predict import supervised_regime_prediction
 
 def align_and_trim_to_full_rows(*dfs: pd.DataFrame) -> list[pd.DataFrame]:
     """
@@ -194,3 +195,84 @@ def backtest_static_hrp_var(weekly_returns: pd.DataFrame, lookback_weeks: int = 
 
     # Return weights, weekly PnL, and cumulative PnL (fill NaNs arising from the shift).
     return {"weights": weights, "pnl": pnl.fillna(0.0), "cum_pnl": pnl.fillna(0.0).cumsum()}
+
+
+
+# --- 4. Supervised HRP Backtest (Uses XGBoost Regime) ---
+def backtest_supervised_hrp(
+    features_std: pd.DataFrame,
+    ret_weekly_trim: pd.DataFrame, 
+    prices_daily_for_cusum: pd.DataFrame, 
+    lookback_weeks: int = 52,
+    rebalance_freq: int = 1,
+    min_train_weeks: int = 104,
+    cusum_threshold: float = 0.005 
+) -> dict:
+    """
+    Backtest HRP with regime switching driven by Supervised Model (XGBoost)
+    using CUSUM-filtered labels.
+    """
+    # 1. Generate Supervised Regime Labels
+    supervised_regimes, final_model = supervised_regime_prediction(
+        # Pass features_std from the input
+        features_std=features_std, 
+        # Pass prices_daily_for_cusum from the input, but name it 'prices_daily'
+        prices_daily=prices_daily_for_cusum, 
+        # Pass other parameters
+        min_train_weeks=min_train_weeks,
+        cusum_threshold=cusum_threshold
+        # Add refit_every_weeks and test_window_weeks if you included them
+    )
+    
+    # Align and trim data 
+    df_aligned = pd.concat(
+        [ret_weekly_trim, supervised_regimes.rename("regime")], axis=1
+    ).dropna(subset=["regime"])
+    
+    weekly_returns_trim = df_aligned.drop(columns=["regime"])
+    regimes = df_aligned["regime"]
+    
+    t0 = lookback_weeks + 1 
+    if t0 >= len(weekly_returns_trim):
+        # Fall back gracefully if not enough history
+        # print("Not enough data to run full supervised HRP backtest.")
+        return {"regimes": pd.Series(dtype=str), "weights": pd.DataFrame(), "pnl": pd.Series(), "cum_pnl": pd.Series()}
+
+    weights = pd.DataFrame(index=weekly_returns_trim.index, columns=weekly_returns_trim.columns, dtype=float)
+    pnl = pd.Series(index=weekly_returns_trim.index, dtype=float)
+
+    from .hrp import hrp_variance, hrp_cvar 
+
+    # Walk-forward portfolio construction
+    for t in range(t0, len(weekly_returns_trim)):
+        if (t - t0) % rebalance_freq != 0:
+            continue
+
+        hist_returns = weekly_returns_trim.iloc[t - lookback_weeks : t]
+        current_regime = regimes.iloc[t] 
+
+        if current_regime == "Crisis":
+            w = hrp_cvar(hist_returns)
+        elif current_regime == "Trending":
+            w = hrp_variance(hist_returns)
+        else:
+            w = 0.5 * hrp_variance(hist_returns) + 0.5 * hrp_cvar(hist_returns)
+
+        abs_sum = np.nansum(np.abs(w.values))
+        if abs_sum > 0:
+            w = w / abs_sum
+
+        weights.iloc[t] = w
+
+        if t + 1 < len(weekly_returns_trim):
+            pnl.iloc[t + 1] = float(np.nansum(w.values * weekly_returns_trim.iloc[t + 1].fillna(0).values))
+
+    weights = weights.ffill()
+    pnl = pnl.fillna(0.0)
+
+    return {
+        "regimes": regimes,
+        "weights": weights,
+        "pnl": pnl,
+        "cum_pnl": pnl.cumsum(),
+    }

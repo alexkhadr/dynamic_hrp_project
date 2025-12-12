@@ -5,3 +5,5 @@ scipy
 scikit-learn
 hmmlearn
 tabulate
+xgboost
+statsmodels

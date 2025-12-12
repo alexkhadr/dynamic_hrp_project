@@ -23,7 +23,7 @@ import matplotlib.pyplot as plt
 # --- Import project modules ---
 from dynamic_hrp.io_data import load_raw_frames, split_ohlcv_blocks, build_price_panels
 from dynamic_hrp.universe import define_investable_universe
-from dynamic_hrp.returns import weekly_log_returns_from_daily, apply_weekly_execution_delay, weekly_last_from_daily 
+from dynamic_hrp.returns import weekly_log_returns_from_daily, apply_weekly_execution_delay, weekly_last_from_daily, daily_log_returns
 from dynamic_hrp.signals import tsmom_signal_ma, smooth_signals
 from dynamic_hrp.features import build_and_standardize_hmm_features
 from dynamic_hrp.backtests import (
@@ -31,11 +31,16 @@ from dynamic_hrp.backtests import (
     backtest_dynamic_hrp,
     backtest_equal_weight,
     backtest_static_hrp_var,
+    backtest_supervised_hrp
 )
 from dynamic_hrp.frac_diff import fractionally_differentiated_log_price
 from dynamic_hrp.graphs import plot_statewise_strategy_hists, plot_hist_by_regime, plot_cumulative_pnl
 from perf import perf_stats  # local performance stats module
 from dynamic_hrp.utils_io import save_table_markdown
+from dynamic_hrp.dsr_metrics import get_deflated_sharpe_ratio
+from dynamic_hrp.cluster_analysis import cluster_feature_importance
+from dynamic_hrp.supervised_regime_predict import _get_target_labels_cusum, supervised_regime_prediction, REGIME_MAP
+from xgboost import XGBClassifier # <-- ADD THIS
 
 
 # =============================================================
@@ -132,29 +137,110 @@ def run(convert_rx1_to_usd: bool = False, show_plots: bool = True):
     )
 
     # ---------------------------------------------------------
-    # 8) Align all data and run backtests
+    # --- Step 8) Align all data and run backtests ---
     # ---------------------------------------------------------
-    # NOTE: `ret_weekly` (standard log returns) is still used for the final PnL.
+
     features_std_trim, ret_weekly_trim, signals_trim = align_and_trim_to_full_rows(
         features_std, ret_weekly, signals_ma_smooth
     )
 
+    # --- Backtest Runs ---
+    
+    # HMM-based HRP
     bt_dyn = backtest_dynamic_hrp(features_std_trim, ret_weekly_trim)
-    bt_eq  = backtest_equal_weight(ret_weekly_trim)
+    
+    # Supervised-based Dynamic HRP
+    print("Starting Supervised HRP Backtest")
+    bt_sup = backtest_supervised_hrp(features_std = features_std_trim,
+                                     ret_weekly_trim = ret_weekly_trim,
+                                     prices_daily_for_cusum = univ_d,
+                                     cusum_threshold = 0.005
+                                    )
+    
+    # Baselines
+    bt_eq = backtest_equal_weight(ret_weekly_trim)
     bt_hrp = backtest_static_hrp_var(ret_weekly_trim)
+
+    
+    # ---------------------------------------------------------
+    # 8b) Feature Analysis: Clustered Importance (for Supervised Model)
+    # ---------------------------------------------------------
+
+    # NOTE: To do this right, we need the final model and the data it was trained on.
+    # The simplest method is to retrain the model once on the entire trimmed dataset
+    # to get a single, final model object for analysis.
+    
+    # We need to extract the training features and targets:
+    # from dynamic_hrp.regime_predict import _get_target_labels_cusum, supervised_regime_prediction
+    
+    y_labels = _get_target_labels_cusum(univ_d, weekly_index=features_std_trim.index, threshold=0.005)
+    
+    # Align features (X) and CUSUM-derived labels (Y) for the full period
+    df_analysis = pd.concat([features_std_trim, y_labels.rename("target")], axis=1).dropna(subset=["target"])
+    X_full = df_analysis.drop(columns=["target"])
+    Y_map = {v: k for k, v in REGIME_MAP.items()}
+    Y_full = df_analysis["target"].map(Y_map)
+    
+    # Retrain final XGBoost model for analysis (best practice for feature importance)
+    final_model = XGBClassifier(use_label_encoder=False, eval_metric='mlogloss', 
+                                n_estimators=50, max_depth=3, random_state=42, 
+                                n_jobs=-1, verbosity=0)
+    final_model.fit(X_full, Y_full)
+
+    # Run Clustered Feature Importance
+    print("\nStarting Clustered Feature Importance Analysis...")
+    feat_imp_df = cluster_feature_importance(
+        X_train=X_full,
+        y_train=Y_full,
+        model=final_model,
+        corr_threshold=0.7 # Tighter clustering for better separation
+    )
+    
+    save_table_markdown(feat_imp_df, out_dir="Tables", name="clustered_feature_importance")
 
     # ---------------------------------------------------------
     # 9) Evaluate performance (weekly statistics)
     # ---------------------------------------------------------
     perf_dyn = perf_stats(bt_dyn["pnl"])
+    perf_sup = perf_stats(bt_sup["pnl"]) # New entry
     perf_eq  = perf_stats(bt_eq["pnl"])
     perf_hrp = perf_stats(bt_hrp["pnl"])
 
     perf_table = pd.DataFrame({
-        "Dynamic HRP": perf_dyn,
+        "Dynamic HRP (HMM)": perf_dyn,
+        "Dynamic HRP (Supervised)": perf_sup, # New column
         "Equal Weight": perf_eq,
         "Static HRP (Var)": perf_hrp,
     }).T
+    
+    # =========================================================
+    # 9a) NEW: Compute Deflated Sharpe Ratio (DSR)
+    # =========================================================
+    # N_trials: Effective number of strategies being compared (Dyn HRP, EW, Static HRP)
+    n_trials = 3 
+    # Annualization factor for weekly data is 52
+    annualization_factor = 52 
+    # N_obs is the number of periodic observations, which is the same for all strategies.
+    n_obs_periodic = perf_table["N_obs"].iloc[0] 
+    # N_obs for DSR must be in *annualized* terms
+    n_obs_annualized = n_obs_periodic / annualization_factor
+
+    dsr_values = {}
+    for name, row in perf_table.iterrows():
+        # Compute DSR using the Sharpe, Skew, and Kurtosis from perf_stats
+        dsr = get_deflated_sharpe_ratio(
+            sr=row["Sharpe"],
+            n_trials=n_trials,
+            n_obs=n_obs_annualized,
+            skew=row["Skew"],
+            kurt=row["Kurtosis"],
+        )
+        dsr_values[name] = dsr
+
+    # Add DSR to the performance table and remove the temporary N_obs
+    perf_table["DSR"] = pd.Series(dsr_values)
+    perf_table = perf_table.drop(columns=["N_obs"])
+
 
     save_table_markdown(perf_table, out_dir="Tables", name="performance_weekly")
 
